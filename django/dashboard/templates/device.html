@@ -1,0 +1,490 @@
+{% load static %}
+
+<!DOCTYPE html>
+<html>
+    <head>
+        <title>Sensor Dashboard</title>
+
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+        <link rel="stylesheet" href="{% static 'css/tailwind.css' %}">
+        <script src="https://cdn.plot.ly/plotly-4.0.0.min.js"></script>
+
+        <script>
+            let activeRange = "hours=24";
+            let activeMetric = "temperature_c";
+
+            const metrics = {
+                temperature_c: {
+                    name: "Temperature",
+                    unit: "°C",
+                    decimals: 2
+                },
+
+                thermistor_ohms: {
+                    name: "Thermistor resistance",
+                    unit: "Ω",
+                    decimals: 0
+                },
+
+                adc: {
+                    name: "ADC",
+                    unit: "",
+                    decimals: 0
+                }
+            };
+
+            function timeAgo(timestamp) {
+                if (!timestamp) return "Never";
+
+                const then = new Date(timestamp);
+                const now = new Date();
+
+                const seconds = Math.floor((now - then) / 1000);
+
+                if (seconds < 5) return "Just now";
+                if (seconds < 60) return `${seconds}s ago`;
+
+                const minutes = Math.floor(seconds / 60);
+
+                if (minutes < 60) {
+                    return `${minutes} ${minutes === 1 ? "minute" : "minutes"} ago`;
+                }
+
+                const hours = Math.floor(minutes / 60);
+
+                if (hours < 24) {
+                    return `${hours} ${hours === 1 ? "hour" : "hours"} ago`;
+                }
+
+                const days = Math.floor(hours / 24);
+
+                return `${days} ${days === 1 ? "day" : "days"} ago`;
+            }
+
+            async function getDevice() {
+                const response = await fetch(
+                    `/sensors/${document.body.dataset.deviceId}/`
+                );
+
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}`);
+                }
+
+                return await response.json();
+            }
+
+            async function getHistory(range = "hours=24") {
+                const response = await fetch(
+                    `/sensors/${document.body.dataset.deviceId}/history/?${range}`
+                );
+
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}`);
+                }
+
+                return await response.json();
+            }
+
+            function updateDeviceDetails(device) {
+                document.querySelector("#device-name").textContent =
+                    device.name ?? device.device_id;
+
+                document.querySelector("#device-id").textContent =
+                    device.device_id;
+
+                document.querySelector("#current-temperature").textContent =
+                    device.latest_reading?.temperature_c ?? "--";
+
+                document.querySelector("#thermistor-resistance").textContent =
+                    device.latest_reading?.thermistor_ohms
+                        ? `${(device.latest_reading.thermistor_ohms / 1000).toFixed(1)} kΩ`
+                        : "--";
+
+                document.querySelector("#adc-value").textContent =
+                    device.latest_reading?.adc ?? "--";
+
+                document.querySelector("#last-reading").dataset.timestamp =
+                    device.latest_reading_received_at ?? "";
+
+                document.querySelector("#last-reading").textContent =
+                    timeAgo(device.latest_reading_received_at);
+
+                document.querySelector("#state-changed").dataset.timestamp =
+                    device.state_changed_at ?? "";
+
+                document.querySelector("#state-changed").textContent =
+                    timeAgo(device.state_changed_at);
+
+                const state = document.querySelector("#device-state");
+
+                state.textContent = device.active ? "Active" : "Inactive";
+
+                state.className = `
+                    rounded-full px-2.5 py-1 text-xs font-medium
+                    ${
+                        device.active
+                            ? "bg-emerald-950 text-emerald-400"
+                            : "bg-red-950 text-red-400"
+                    }
+                `;
+            }
+
+            function setActiveRange(range) {
+                activeRange = range;
+
+                document.querySelectorAll("[data-range]").forEach(button => {
+                    const selected = button.dataset.range === range;
+
+                    button.className = selected
+                        ? "rounded-lg bg-zinc-100 px-3 py-1.5 text-sm font-medium text-zinc-950"
+                        : "rounded-lg px-3 py-1.5 text-sm font-medium text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100";
+                });
+            }
+
+            function setActiveMetric(metric) {
+                document.querySelectorAll("[data-metric]").forEach(button => {
+                    const selected = button.dataset.metric === metric;
+
+                    if (selected) {
+                        button.className = "rounded-2xl border border-zinc-700 bg-zinc-800/70 p-5";
+                    } else {
+                        button.className = "rounded-2xl border border-zinc-800 bg-zinc-900 p-5 cursor-pointer transition hover:border-zinc-700 hover:bg-zinc-800/70";
+                    }
+                });
+            }
+
+            async function loadChart(
+                range = activeRange,
+                metric = activeMetric
+            ) {
+                activeRange = range;
+                activeMetric = metric;
+
+                setActiveRange(range);
+                setActiveMetric(metric);
+
+                const history = await getHistory(range);
+
+                const metricConfig = metrics[metric];
+
+                const timestamps = history.readings.map(
+                    reading => reading.received_at
+                );
+
+                const values = history.readings.map(
+                    reading => reading.measurements[metric]
+                );
+
+                Plotly.react(
+                    "measurement-chart",
+                    [
+                        {
+                            x: timestamps,
+                            y: values,
+                            type: "scatter",
+                            mode: "lines",
+
+                            name: metricConfig.name,
+
+                            line: {
+                                width: 2
+                            },
+
+                            hovertemplate:
+                                `%{y:.${metricConfig.decimals}f} ${metricConfig.unit}<br>` +
+                                `%{x}<extra></extra>`
+                        }
+                    ],
+                    {
+                        autosize: true,
+
+                        margin: {
+                            t: 10,
+                            r: 20,
+                            b: 50,
+                            l: 65
+                        },
+
+                        paper_bgcolor: "transparent",
+                        plot_bgcolor: "transparent",
+
+                        font: {
+                            color: "#a1a1aa"
+                        },
+
+                        xaxis: {
+                            gridcolor: "#27272a",
+                            zerolinecolor: "#27272a"
+                        },
+
+                        yaxis: {
+                            title: `${metricConfig.name} ${metricConfig.unit}`,
+                            gridcolor: "#27272a",
+                            zerolinecolor: "#27272a"
+                        },
+
+                        showlegend: false
+                    },
+                    {
+                        responsive: true,
+                        displaylogo: false
+                    }
+                );
+
+                document.querySelector("#chart-title").textContent =
+                    `${metricConfig.name} history`;
+            }
+
+            function updateRelativeTimes() {
+                document.querySelectorAll("[data-timestamp]").forEach(element => {
+                    element.textContent = timeAgo(element.dataset.timestamp);
+                });
+            }
+
+            async function refreshDevice() {
+                try {
+                    const device = await getDevice();
+                    updateDeviceDetails(device);
+                } catch (error) {
+                    console.error("Device refresh failed:", error);
+                }
+            }
+
+            window.addEventListener("DOMContentLoaded", async () => {
+                await refreshDevice();
+                await loadChart("hours=24");
+
+                setInterval(updateRelativeTimes, 1000);
+
+                setInterval(async () => {
+                    await refreshDevice();
+                    await loadChart(activeRange, activeMetric);
+                }, 10000);
+            });
+        </script>
+    </head>
+
+    <body
+        data-device-id="{{ device_id }}"
+        class="min-h-screen bg-zinc-950 text-zinc-100"
+    >
+
+        <main class="mx-auto max-w-7xl px-6 py-8">
+
+            <a
+                href="/"
+                class="mb-6 inline-flex items-center gap-2 text-sm text-zinc-400 hover:text-zinc-100"
+            >
+                ← Environment
+            </a>
+
+            <header class="mb-8 flex items-start justify-between gap-4">
+
+                <div>
+                    <div class="flex items-center gap-3">
+
+                        <h1
+                            id="device-name"
+                            class="text-3xl font-bold tracking-tight"
+                        >
+                            Device
+                        </h1>
+
+                        <span
+                            id="device-state"
+                            class="rounded-full bg-zinc-800 px-2.5 py-1 text-xs font-medium text-zinc-400"
+                        >
+                            Loading...
+                        </span>
+
+                    </div>
+
+                    <p
+                        id="device-id"
+                        class="mt-1 text-sm text-zinc-500"
+                    >
+                        --
+                    </p>
+                </div>
+
+            </header>
+
+            <section class="mb-6 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+
+                <article 
+                    class="rounded-2xl border border-zinc-800 bg-zinc-900 p-5 transition hover:border-zinc-700 hover:bg-zinc-800/70"
+                    data-metric="temperature_c"
+                    onclick="loadChart(activeRange, 'temperature_c')"
+                >
+                    <p class="text-sm text-zinc-500">
+                        Temperature
+                    </p>
+
+                    <div class="mt-3 flex items-end gap-2">
+                        <span
+                            id="current-temperature"
+                            class="text-4xl font-light tracking-tight"
+                        >
+                            --
+                        </span>
+
+                        <span class="pb-1 text-zinc-400">
+                            °C
+                        </span>
+                    </div>
+                </article>
+
+                <article
+                    class="rounded-2xl border border-zinc-800 bg-zinc-900 p-5 transition hover:border-zinc-700 hover:bg-zinc-800/70"
+                    data-metric="thermistor_ohms"
+                    onclick="loadChart(activeRange, 'thermistor_ohms')"
+                >
+                    <p class="text-sm text-zinc-500">
+                        Thermistor
+                    </p>
+
+                    <div
+                        id="thermistor-resistance"
+                        class="mt-3 text-3xl font-light"
+                    >
+                        --
+                    </div>
+                </article>
+
+                <article
+                    class="rounded-2xl border border-zinc-800 bg-zinc-900 p-5 transition hover:border-zinc-700 hover:bg-zinc-800/70"
+                    data-metric="adc"
+                    onclick="loadChart(activeRange, 'adc')"
+                >
+                    <p class="text-sm text-zinc-500">
+                        ADC
+                    </p>
+
+                    <div
+                        id="adc-value"
+                        class="mt-3 text-3xl font-light"
+                    >
+                        --
+                    </div>
+                </article>
+
+                <article class="rounded-2xl border border-zinc-800 bg-zinc-900 p-5">
+                    <p class="text-sm text-zinc-500">
+                        Last reading
+                    </p>
+
+                    <div
+                        id="last-reading"
+                        data-timestamp=""
+                        class="mt-3 text-xl font-medium"
+                    >
+                        --
+                    </div>
+
+                    <p class="mt-2 text-xs text-zinc-500">
+                        State changed
+                        <span
+                            id="state-changed"
+                            data-timestamp=""
+                            class="float-right text-zinc-400"
+                        >
+                            --
+                        </span>
+                    </p>
+                </article>
+
+            </section>
+
+            <section class="rounded-2xl border border-zinc-800 bg-zinc-900 p-5">
+
+                <div class="mb-4">
+
+                    <div class="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+
+                        <div>
+                            <h2
+                                id="chart-title"
+                                class="text-lg font-semibold"
+                            >
+                                Temperature history
+                            </h2>
+
+                            <p class="mt-1 text-sm text-zinc-500">
+                                Historical readings for this device
+                            </p>
+                        </div>
+
+                        <div class="flex flex-wrap gap-3">
+
+                            <!-- range selector -->
+
+                            <div class="flex flex-wrap gap-1 rounded-xl bg-zinc-950 p-1">
+
+                                <button
+                                    data-range="minutes=1"
+                                    onclick="loadChart('minutes=1')"
+                                >
+                                    1m
+                                </button>
+
+                                <button
+                                    data-range="minutes=15"
+                                    onclick="loadChart('minutes=15')"
+                                >
+                                    15m
+                                </button>
+
+                                <button
+                                    data-range="hours=1"
+                                    onclick="loadChart('hours=1')"
+                                >
+                                    1h
+                                </button>
+
+                                <button
+                                    data-range="hours=6"
+                                    onclick="loadChart('hours=6')"
+                                >
+                                    6h
+                                </button>
+
+                                <button
+                                    data-range="hours=24"
+                                    onclick="loadChart('hours=24')"
+                                >
+                                    24h
+                                </button>
+
+                                <button
+                                    data-range="days=7"
+                                    onclick="loadChart('days=7')"
+                                >
+                                    7d
+                                </button>
+
+                                <button
+                                    data-range="months=1"
+                                    onclick="loadChart('months=1')"
+                                >
+                                    1mo
+                                </button>
+
+                            </div>
+
+                        </div>
+                    </div>
+                </div>
+
+                <div
+                    id="measurement-chart"
+                    class="h-[420px] w-full"
+                ></div>
+
+            </section>
+
+        </main>
+
+    </body>
+</html>
