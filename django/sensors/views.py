@@ -1,21 +1,29 @@
-# from datetime import timedelta
-# from dateutil.relativedelta import relativedelta
-
 from django.http import JsonResponse
 from django.shortcuts import render
-from django.views.decorators.http import require_POST
+from django.views.decorators.http import require_POST, require_GET
 from django.views.decorators.csrf import csrf_exempt
 from django.db import transaction
 from datetime import datetime
+from django.utils import timezone
+from django.conf import settings
+
+from datetime import timedelta
+from dateutil.relativedelta import relativedelta
 
 import serial
 import json
 import time
 import math
 import secrets
+import uuid
 
 # from sensors.models import Device, Reading, State
-from sensors.models import DataStream, LocalStream, Reading
+from sensors.models import (
+    DataStream,
+    LocalStream,
+    ExternalStream,
+    Reading,
+)
 
 # class DeviceNotFound(Exception):
 #     pass
@@ -49,6 +57,129 @@ up-to-date units, if not registered / up-to-date it updates, then just sends rea
 # API Key for devices, use one for all devices for now, will upgrade to bearer / whatever later on
 # ESP32 should be hardcoded to send this api-key, if not req will be refused
 
+def serialize_stream(stream, include_latest=True):
+    """
+    Convert a DataStream into the public API representation.
+    """
+
+    data = {
+        "id": str(stream.id),
+        "name": stream.name,
+        "metrics": stream.metrics,
+        "metadata": stream.metadata,
+        "added_on": stream.added_on.isoformat(),
+        "updated_on": stream.updated_on.isoformat(),
+    }
+
+    # Describe where this stream originates from
+    try:
+        data["source"] = {
+            "type": "local",
+            "device_id": stream.internal.device_id,
+        }
+    except LocalStream.DoesNotExist:
+        try:
+            data["source"] = {
+                "type": "external",
+                "provider": stream.external.provider,
+            }
+        except ExternalStream.DoesNotExist:
+            data["source"] = {
+                "type": "unknown",
+            }
+
+    if include_latest:
+        latest = (
+            stream.readings
+            .order_by("-observed_at")
+            .first()
+        )
+
+        data["latest_reading"] = (
+            {
+                "id": str(latest.id),
+                "observed_at": latest.observed_at.isoformat(),
+                "received_at": latest.received_at.isoformat(),
+                "measurements": latest.measurements,
+            }
+            if latest
+            else None
+        )
+
+    return data
+
+
+def get_reading_range(request):
+    """
+    Parse relative time query parameters.
+
+    Defaults to the last 24 hours.
+    """
+
+    allowed_params = {
+        "months",
+        "weeks",
+        "days",
+        "hours",
+        "minutes",
+        "seconds",
+    }
+
+    unknown = set(request.GET.keys()) - allowed_params
+
+    if unknown:
+        return None, JsonResponse({
+            "error": "invalid_parameter",
+            "message": (
+                f"Unknown parameter(s): "
+                f"{', '.join(sorted(unknown))}"
+            )
+        }, status=400)
+
+    params = {
+        "months": request.GET.get("months", "0"),
+        "weeks": request.GET.get("weeks", "0"),
+        "days": request.GET.get("days", "0"),
+        "hours": request.GET.get("hours", "0"),
+        "minutes": request.GET.get("minutes", "0"),
+        "seconds": request.GET.get("seconds", "0"),
+    }
+
+    if not request.GET:
+        params["days"] = "1"
+
+    for key, value in params.items():
+        try:
+            value = int(value)
+        except ValueError:
+            return None, JsonResponse({
+                "error": "invalid_parameter",
+                "message": f"'{key}' must be an integer"
+            }, status=400)
+
+        if value < 0:
+            return None, JsonResponse({
+                "error": "invalid_parameter",
+                "message": f"'{key}' must be 0 or greater"
+            }, status=400)
+
+        params[key] = value
+
+    since = (
+        timezone.now()
+        - relativedelta(months=params["months"])
+        - timedelta(
+            weeks=params["weeks"],
+            days=params["days"],
+            hours=params["hours"],
+            minutes=params["minutes"],
+            seconds=params["seconds"],
+        )
+    )
+
+    return since, None
+
+
 @csrf_exempt
 @require_POST
 def register_local(request):
@@ -77,7 +208,7 @@ def register_local(request):
 
     api_key = request.headers.get("X-API-Key")
 
-    if api_key != DEVICE_API_KEY:
+    if api_key != settings.DEVICE_API_KEY:
         return JsonResponse({
             "error": "Unauthorized"
         }, status=401)
@@ -226,7 +357,7 @@ def local_ingest(request):
 
     api_key = request.headers.get("X-API-Key")
     
-    if not api_key or not secrets.compare_digest(api_key, DEVICE_API_KEY):
+    if not api_key or not secrets.compare_digest(api_key, settings.DEVICE_API_KEY):
         return JsonResponse({
             "error": "Unauthorized"
         }, status=401)
@@ -353,10 +484,130 @@ def local_ingest(request):
         "status": "ok",
     }, status=200)
 
+
+@require_GET
+def all_streams(request):
+    streams = (
+        DataStream.objects
+        .select_related("internal", "external")
+        .all()
+    )
+
+    return JsonResponse({
+        "streams": [
+            serialize_stream(stream)
+            for stream in streams
+        ]
+    })
+
+
+@require_GET
+def single_stream(request, stream_id):
+    try:
+        stream = (
+            DataStream.objects
+            .select_related("internal", "external")
+            .get(id=stream_id)
+        )
+
+    except (DataStream.DoesNotExist, ValueError):
+        return JsonResponse({
+            "error": "stream_not_found",
+            "message": f"Data stream '{stream_id}' was not found"
+        }, status=404)
+
+    return JsonResponse(
+        serialize_stream(stream),
+        status=200
+    )
+
+
+@require_GET
+def stream_readings(request, stream_id):
+    try:
+        stream = DataStream.objects.get(id=stream_id)
+
+    except (DataStream.DoesNotExist, ValueError):
+        return JsonResponse({
+            "error": "stream_not_found",
+            "message": f"Data stream '{stream_id}' was not found"
+        }, status=404)
+
+    since, error = get_reading_range(request)
+
+    if error:
+        return error
+
+    readings = (
+        Reading.objects
+        .filter(
+            stream=stream,
+            observed_at__gte=since,
+        )
+        .order_by("observed_at")
+    )
+
+    return JsonResponse({
+        "stream": serialize_stream(
+            stream,
+            include_latest=False,
+        ),
+        "from": since.isoformat(),
+        "readings": [
+            {
+                "id": str(reading.id),
+                "observed_at": reading.observed_at.isoformat(),
+                "received_at": reading.received_at.isoformat(),
+                "measurements": reading.measurements,
+            }
+            for reading in readings
+        ],
+    })
+
+
+@require_GET
+def local_stream(request, device_id):
+    try:
+        local = (
+            LocalStream.objects
+            .select_related("stream")
+            .get(device_id=device_id)
+        )
+
+    except LocalStream.DoesNotExist:
+        return JsonResponse({
+            "error": "device_not_found",
+            "message": f"Device '{device_id}' was not found"
+        }, status=404)
+
+    return JsonResponse(
+        serialize_stream(local.stream),
+        status=200
+    )
+
+
+@require_GET
+def local_stream_readings(request, device_id):
+    try:
+        local = LocalStream.objects.get(
+            device_id=device_id
+        )
+
+    except LocalStream.DoesNotExist:
+        return JsonResponse({
+            "error": "device_not_found",
+            "message": f"Device '{device_id}' was not found"
+        }, status=404)
+
+    return stream_readings(
+        request,
+        local.stream.id,
+    )
+
 # @csrf_exempt
 # @require_POST
 # def local_ingest(request):
-#     print(DEVICE_API_KEY)
+#     print(settings.DEVICE_API_KEY)
 
 
 

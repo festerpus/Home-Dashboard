@@ -3,13 +3,55 @@
 <!DOCTYPE html>
 <html>
     <head>
-        <title>Sensor Dashboard</title>
+        <title>Environment</title>
 
-        <link rel="stylesheet" href="{% static 'css/tailwind.css' %}">
+        <meta charset="UTF-8">
+        <meta
+            name="viewport"
+            content="width=device-width, initial-scale=1.0"
+        >
+
+        <link
+            rel="stylesheet"
+            href="{% static 'css/tailwind.css' %}"
+        >
 
         <script>
+            /*
+                API endpoints.
+
+                Keeping these here makes them easy to change if the
+                Django URL structure changes later.
+            */
+
+            const STREAMS_URL = "/sensors/streams/";
+            const EVENTS_URL = "/sensors/events/";
+
+            /*
+                Store stream information client-side.
+
+                stream ID -> stream object
+            */
+
+            const streams = new Map();
+
+
+            // --------------------------------------------------
+            // UTILITIES
+            // --------------------------------------------------
+
+            function escapeHtml(value) {
+                return String(value ?? "")
+                    .replaceAll("&", "&amp;")
+                    .replaceAll("<", "&lt;")
+                    .replaceAll(">", "&gt;")
+                    .replaceAll('"', "&quot;")
+                    .replaceAll("'", "&#039;");
+            }
+
 
             function timeAgo(timestamp) {
+
                 if (!timestamp) {
                     return "Never";
                 }
@@ -17,227 +59,1020 @@
                 const then = new Date(timestamp);
                 const now = new Date();
 
-                const seconds = Math.floor((now - then) / 1000);
+                const seconds = Math.floor(
+                    (now - then) / 1000
+                );
 
                 if (seconds < 5) {
                     return "Just now";
                 }
 
                 if (seconds < 60) {
-                    return `${seconds} seconds ago`;
+                    return `${seconds}s ago`;
                 }
 
-                const minutes = Math.floor(seconds / 60);
+                const minutes = Math.floor(
+                    seconds / 60
+                );
 
                 if (minutes < 60) {
-                    return `${minutes} ${minutes === 1 ? "minute" : "minutes"} ago`;
+                    return (
+                        `${minutes} ` +
+                        `${minutes === 1 ? "minute" : "minutes"} ago`
+                    );
                 }
 
-                const hours = Math.floor(minutes / 60);
+                const hours = Math.floor(
+                    minutes / 60
+                );
 
                 if (hours < 24) {
-                    return `${hours} ${hours === 1 ? "hour" : "hours"} ago`;
+                    return (
+                        `${hours} ` +
+                        `${hours === 1 ? "hour" : "hours"} ago`
+                    );
                 }
 
-                const days = Math.floor(hours / 24);
+                const days = Math.floor(
+                    hours / 24
+                );
 
                 if (days < 30) {
-                    return `${days} ${days === 1 ? "day" : "days"} ago`;
+                    return (
+                        `${days} ` +
+                        `${days === 1 ? "day" : "days"} ago`
+                    );
                 }
 
                 return then.toLocaleDateString();
             }
 
-            function updateRelativeTimes() {
-                document.querySelectorAll(".sensor-last-reading").forEach(element => {
-                    element.textContent = timeAgo(element.dataset.timestamp);
-                });
+
+            function formatValue(value, config) {
+
+                if (
+                    value === null
+                    || value === undefined
+                ) {
+                    return "--";
+                }
+
+                if (typeof value !== "number") {
+                    return value;
+                }
+
+                const decimals =
+                    Number.isInteger(config?.decimals)
+                        ? config.decimals
+                        : 2;
+
+                return value.toFixed(decimals);
             }
 
-            function sensorCard(sensor) {
-                const active = sensor.active;
+
+            function sourceLabel(stream) {
+
+                if (stream.source?.type === "local") {
+                    return stream.source.device_id;
+                }
+
+                if (stream.source?.type === "external") {
+                    return stream.source.provider;
+                }
+
+                return "Unknown source";
+            }
+
+
+            function streamName(stream) {
+                return (
+                    stream.name
+                    || sourceLabel(stream)
+                    || "Unnamed stream"
+                );
+            }
+
+
+            // --------------------------------------------------
+            // CONNECTION STATE
+            // --------------------------------------------------
+
+            function setConnectionState(state) {
+
+                const indicator =
+                    document.querySelector(
+                        "#connection-indicator"
+                    );
+
+                const label =
+                    document.querySelector(
+                        "#connection-label"
+                    );
+
+                if (state === "connected") {
+
+                    indicator.className =
+                        "h-2 w-2 rounded-full bg-emerald-400";
+
+                    label.textContent = "Live";
+
+                    label.className =
+                        "text-xs font-medium text-emerald-400";
+
+                    return;
+                }
+
+                if (state === "connecting") {
+
+                    indicator.className =
+                        "h-2 w-2 rounded-full bg-amber-400";
+
+                    label.textContent = "Connecting";
+
+                    label.className =
+                        "text-xs font-medium text-amber-400";
+
+                    return;
+                }
+
+                indicator.className =
+                    "h-2 w-2 rounded-full bg-red-400";
+
+                label.textContent = "Disconnected";
+
+                label.className =
+                    "text-xs font-medium text-red-400";
+            }
+
+
+            // --------------------------------------------------
+            // METRIC HTML
+            // --------------------------------------------------
+
+            function metricCard(
+                streamId,
+                metricKey,
+                metricConfig,
+                value
+            ) {
+
+                const name =
+                    metricConfig?.name
+                    ?? metricKey;
+
+                const unit =
+                    metricConfig?.unit
+                    ?? "";
 
                 return `
-                    <a href="/device/${sensor.id}/" class="block">
-                        <article
-                            id="sensor-${sensor.id}" 
-                            data-last-reading="${sensor.latest_reading_recieved_at ?? ""}"
-                            class="rounded-2xl border border-zinc-800 bg-zinc-900 p-5 shadow-sm transition hover:border-zinc-700 hover:bg-zinc-800/70"
+                    <div
+                        class="
+                            rounded-xl
+                            border
+                            border-zinc-800
+                            bg-zinc-950/60
+                            px-4
+                            py-3
+                        "
+                    >
+                        <p
+                            class="
+                                truncate
+                                text-xs
+                                text-zinc-500
+                            "
                         >
-                            <div class="flex items-start justify-between gap-4">
-                                <div>
-                                    <h2 class="text-lg font-semibold">
-                                        ${sensor.name}
-                                    </h2>
+                            ${escapeHtml(name)}
+                        </p>
 
-                                    <p class="mt-1 text-xs text-zinc-500">
-                                        ${sensor.device_id}
-                                    </p>
-                                </div>
+                        <div
+                            class="
+                                mt-2
+                                flex
+                                items-end
+                                gap-1.5
+                            "
+                        >
+                            <span
+                                id="metric-${streamId}-${metricKey}"
+                                class="
+                                    text-2xl
+                                    font-light
+                                    tracking-tight
+                                    text-zinc-100
+                                "
+                            >
+                                ${escapeHtml(
+                                    formatValue(
+                                        value,
+                                        metricConfig
+                                    )
+                                )}
+                            </span>
 
-                                <span class="sensor-state rounded-full px-2.5 py-1 text-xs font-medium ${
-                                    active
-                                        ? "bg-emerald-950 text-emerald-400"
-                                        : "bg-red-950 text-red-400"
-                                }">
-                                    ${active ? "Active" : "Inactive"}
-                                </span>
-                            </div>
-
-                            <div class="mt-8">
-                                <div class="flex items-end gap-2">
-                                    <span class="sensor-temperature text-5xl font-light tracking-tight">
-                                        ${sensor.latest_reading?.temperature_c ?? "--"}
+                            ${
+                                unit
+                                ? `
+                                    <span
+                                        class="
+                                            pb-0.5
+                                            text-sm
+                                            text-zinc-500
+                                        "
+                                    >
+                                        ${escapeHtml(unit)}
                                     </span>
+                                `
+                                : ""
+                            }
 
-                                    <span class="pb-1 text-lg text-zinc-400">
-                                        °C
-                                    </span>
-                                </div>
-                            </div>
-
-                            <div class="mt-8 border-t border-zinc-800 pt-4 text-sm text-zinc-400">
-                                Last reading
-
-                                <span class="sensor-last-reading float-right text-zinc-300" data-timestamp="${sensor.latest_reading_received_at ?? ""}">
-                                    ${timeAgo(sensor.latest_reading_received_at)}
-                                </span>
-                            </div>
-                        </article>
-                    </a>
+                        </div>
+                    </div>
                 `;
             }
 
-            function updateSensorCard(sensor) {
-                const card = document.querySelector(`#sensor-${sensor.id}`);
+
+            // --------------------------------------------------
+            // STREAM CARD
+            // --------------------------------------------------
+
+            function streamCard(stream) {
+
+                const latest =
+                    stream.latest_reading;
+
+                const metrics =
+                    stream.metrics ?? {};
+
+                const measurements =
+                    latest?.measurements ?? {};
+
+                const metricCards =
+                    Object.entries(metrics)
+                    .map(([key, config]) => {
+                        return metricCard(
+                            stream.id,
+                            key,
+                            config,
+                            measurements[key]
+                        );
+                    })
+                    .join("");
+
+                return `
+                    <article
+                        id="stream-${stream.id}"
+                        data-stream-id="${stream.id}"
+                        class="
+                            rounded-2xl
+                            border
+                            border-zinc-800
+                            bg-zinc-900
+                            p-5
+                            shadow-sm
+                            transition
+                            hover:border-zinc-700
+                        "
+                    >
+
+                        <div
+                            class="
+                                flex
+                                items-start
+                                justify-between
+                                gap-4
+                            "
+                        >
+
+                            <div class="min-w-0">
+
+                                <h2
+                                    class="
+                                        truncate
+                                        text-lg
+                                        font-semibold
+                                    "
+                                >
+                                    ${escapeHtml(
+                                        streamName(stream)
+                                    )}
+                                </h2>
+
+                                <p
+                                    class="
+                                        mt-1
+                                        truncate
+                                        text-xs
+                                        text-zinc-500
+                                    "
+                                >
+                                    ${escapeHtml(
+                                        sourceLabel(stream)
+                                    )}
+                                </p>
+
+                            </div>
+
+
+                            <span
+                                class="
+                                    stream-live-state
+                                    rounded-full
+                                    bg-zinc-800
+                                    px-2.5
+                                    py-1
+                                    text-xs
+                                    font-medium
+                                    text-zinc-400
+                                "
+                            >
+                                Waiting
+                            </span>
+
+                        </div>
+
+
+                        <div
+                            class="
+                                mt-6
+                                grid
+                                grid-cols-2
+                                gap-3
+                            "
+                        >
+                            ${metricCards}
+                        </div>
+
+
+                        <div
+                            class="
+                                mt-5
+                                border-t
+                                border-zinc-800
+                                pt-4
+                            "
+                        >
+
+                            <div
+                                class="
+                                    flex
+                                    items-center
+                                    justify-between
+                                    gap-4
+                                    text-xs
+                                "
+                            >
+
+                                <span class="text-zinc-500">
+                                    Last reading
+                                </span>
+
+                                <span
+                                    class="
+                                        stream-last-reading
+                                        text-zinc-300
+                                    "
+                                    data-timestamp="${
+                                        latest?.received_at ?? ""
+                                    }"
+                                >
+                                    ${timeAgo(
+                                        latest?.received_at
+                                    )}
+                                </span>
+
+                            </div>
+
+
+                            <div
+                                class="
+                                    mt-3
+                                    flex
+                                    items-center
+                                    justify-between
+                                    gap-4
+                                "
+                            >
+
+                                <span
+                                    class="
+                                        text-[11px]
+                                        text-zinc-600
+                                    "
+                                >
+                                    ${escapeHtml(stream.id)}
+                                </span>
+
+                                <a
+                                    href="/streams/${stream.id}/"
+                                    class="
+                                        text-xs
+                                        font-medium
+                                        text-zinc-400
+                                        hover:text-zinc-100
+                                    "
+                                >
+                                    Details →
+                                </a>
+
+                            </div>
+
+                        </div>
+
+                    </article>
+                `;
+            }
+
+
+            // --------------------------------------------------
+            // INITIAL LOAD
+            // --------------------------------------------------
+
+            async function getStreams() {
+
+                const response =
+                    await fetch(STREAMS_URL);
+
+                if (!response.ok) {
+                    throw new Error(
+                        `HTTP ${response.status}`
+                    );
+                }
+
+                return await response.json();
+            }
+
+
+            async function loadStreams() {
+
+                const grid =
+                    document.querySelector(
+                        "#stream-grid"
+                    );
+
+                const empty =
+                    document.querySelector(
+                        "#empty-state"
+                    );
+
+                try {
+
+                    const data =
+                        await getStreams();
+
+                    const incoming =
+                        data.streams ?? [];
+
+                    streams.clear();
+
+                    incoming.forEach(stream => {
+                        streams.set(
+                            stream.id,
+                            stream
+                        );
+                    });
+
+
+                    if (!incoming.length) {
+
+                        grid.innerHTML = "";
+
+                        empty.classList.remove(
+                            "hidden"
+                        );
+
+                        return;
+                    }
+
+
+                    empty.classList.add(
+                        "hidden"
+                    );
+
+                    grid.innerHTML =
+                        incoming
+                        .map(streamCard)
+                        .join("");
+
+
+                    incoming.forEach(stream => {
+
+                        if (
+                            stream.latest_reading
+                        ) {
+                            markStreamLive(
+                                stream.id
+                            );
+                        }
+
+                    });
+
+
+                    updateStreamCount();
+
+                } catch (error) {
+
+                    console.error(
+                        "Failed to load streams:",
+                        error
+                    );
+
+                    grid.innerHTML = `
+                        <div
+                            class="
+                                col-span-full
+                                rounded-2xl
+                                border
+                                border-red-900
+                                bg-red-950/30
+                                p-6
+                                text-sm
+                                text-red-300
+                            "
+                        >
+                            Failed to load data streams.
+                        </div>
+                    `;
+                }
+            }
+
+
+            // --------------------------------------------------
+            // LIVE UPDATES
+            // --------------------------------------------------
+
+            function markStreamLive(streamId) {
+
+                const card =
+                    document.querySelector(
+                        `#stream-${streamId}`
+                    );
 
                 if (!card) {
                     return;
                 }
 
-                const previousTimestamp = card.dataset.lastReading;
-                const newTimestamp = sensor.latest_reading_received_at ?? "";
+                const state =
+                    card.querySelector(
+                        ".stream-live-state"
+                    );
 
-                if (previousTimestamp === newTimestamp) {
-                    return;
-                }
-
-                card.dataset.lastReading = newTimestamp;
-
-                const temperature = card.querySelector(".sensor-temperature");
-                const lastReading = card.querySelector(".sensor-last-reading");
-                const state = card.querySelector(".sensor-state");
-
-                temperature.textContent =
-                    sensor.latest_reading?.temperature_c ?? "--";
-
-                lastReading.dataset.timestamp = newTimestamp;
-                lastReading.textContent = timeAgo(newTimestamp);
-
-                state.textContent = sensor.active ? "Active" : "Inactive";
+                state.textContent = "Live";
 
                 state.className = `
-                    sensor-state
+                    stream-live-state
                     rounded-full
-                    px-2.5 py-1
+                    bg-emerald-950
+                    px-2.5
+                    py-1
                     text-xs
                     font-medium
-                    ${
-                        sensor.active
-                            ? "bg-emerald-950 text-emerald-400"
-                            : "bg-red-950 text-red-400"
-                    }
+                    text-emerald-400
                 `;
             }
 
-            async function watchSensors() {
-                try {
-                    const response = await fetch("/sensors/");
 
-                    if (!response.ok) {
-                        throw new Error(`HTTP ${response.status}`);
+            function updateMetric(
+                stream,
+                metricKey,
+                value
+            ) {
+
+                const element =
+                    document.getElementById(
+                        `metric-${stream.id}-${metricKey}`
+                    );
+
+                if (!element) {
+                    /*
+                        Metric definition may have changed since
+                        the initial page load.
+
+                        Reloading the stream list is safer than
+                        trying to reconstruct the card from an
+                        SSE Reading alone.
+                    */
+
+                    return false;
+                }
+
+                const config =
+                    stream.metrics?.[metricKey];
+
+                element.textContent =
+                    formatValue(
+                        value,
+                        config
+                    );
+
+                return true;
+            }
+
+
+            function updateStreamReading(reading) {
+
+                const stream =
+                    streams.get(
+                        reading.stream_id
+                    );
+
+                if (!stream) {
+
+                    /*
+                        A new stream may have been registered while
+                        the page was already open.
+                    */
+
+                    loadStreams();
+
+                    return;
+                }
+
+
+                let requiresReload = false;
+
+                Object.entries(
+                    reading.measurements ?? {}
+                ).forEach(([key, value]) => {
+
+                    if (
+                        !updateMetric(
+                            stream,
+                            key,
+                            value
+                        )
+                    ) {
+                        requiresReload = true;
                     }
 
-                    const data = await response.json();
+                });
 
-                    data.sensors.forEach(updateSensorCard);
 
-                } catch (error) {
-                    console.error("Sensor watch failed:", error);
-                }
-            }
-
-            async function getSensors() {
-                const response = await fetch("/sensors/");
-
-                if (!response.ok) {
-                    throw new Error(`HTTP ${response.status}`);
+                if (requiresReload) {
+                    loadStreams();
+                    return;
                 }
 
-                const data = await response.json();
 
-                const grid = document.querySelector("#sensor-grid");
+                stream.latest_reading =
+                    reading;
 
-                grid.innerHTML = data.sensors
-                    .map(sensorCard)
-                    .join("");
 
-                return data.sensors;
+                const card =
+                    document.querySelector(
+                        `#stream-${stream.id}`
+                    );
+
+                if (!card) {
+                    return;
+                }
+
+
+                const lastReading =
+                    card.querySelector(
+                        ".stream-last-reading"
+                    );
+
+                const timestamp =
+                    reading.received_at
+                    ?? reading.observed_at;
+
+
+                lastReading.dataset.timestamp =
+                    timestamp ?? "";
+
+                lastReading.textContent =
+                    timeAgo(timestamp);
+
+
+                markStreamLive(
+                    stream.id
+                );
             }
 
-            window.addEventListener("DOMContentLoaded", async () => {
-                await getSensors();
 
-                watchSensors();
+            // --------------------------------------------------
+            // SSE
+            // --------------------------------------------------
 
-                setInterval(() => {
-                    updateRelativeTimes();
-                }, 1000);
+            function connectEvents() {
 
-                setInterval(() => {
-                    watchSensors();
-                }, 5000);
-            });
+                setConnectionState(
+                    "connecting"
+                );
+
+                const events =
+                    new EventSource(
+                        EVENTS_URL
+                    );
+
+
+                events.addEventListener(
+                    "connected",
+                    event => {
+
+                        setConnectionState(
+                            "connected"
+                        );
+
+                        console.log(
+                            "SSE connected:",
+                            JSON.parse(
+                                event.data
+                            )
+                        );
+                    }
+                );
+
+
+                events.addEventListener(
+                    "reading",
+                    event => {
+
+                        try {
+
+                            const reading =
+                                JSON.parse(
+                                    event.data
+                                );
+
+                            updateStreamReading(
+                                reading
+                            );
+
+                        } catch (error) {
+
+                            console.error(
+                                "Invalid SSE reading:",
+                                error
+                            );
+                        }
+
+                    }
+                );
+
+
+                events.onopen = () => {
+
+                    setConnectionState(
+                        "connected"
+                    );
+
+                };
+
+
+                events.onerror = error => {
+
+                    /*
+                        EventSource automatically attempts to
+                        reconnect.
+
+                        Don't call .close() here.
+                    */
+
+                    setConnectionState(
+                        "connecting"
+                    );
+
+                    console.warn(
+                        "SSE connection lost. Reconnecting...",
+                        error
+                    );
+
+                };
+
+
+                return events;
+            }
+
+
+            // --------------------------------------------------
+            // PAGE UPDATES
+            // --------------------------------------------------
+
+            function updateRelativeTimes() {
+
+                document
+                    .querySelectorAll(
+                        ".stream-last-reading"
+                    )
+                    .forEach(element => {
+
+                        element.textContent =
+                            timeAgo(
+                                element.dataset.timestamp
+                            );
+
+                    });
+            }
+
+
+            function updateStreamCount() {
+
+                const count =
+                    streams.size;
+
+                document.querySelector(
+                    "#stream-count"
+                ).textContent =
+                    `${count} ${
+                        count === 1
+                            ? "stream"
+                            : "streams"
+                    }`;
+
+            }
+
+
+            // --------------------------------------------------
+            // STARTUP
+            // --------------------------------------------------
+
+            window.addEventListener(
+                "DOMContentLoaded",
+                async () => {
+
+                    await loadStreams();
+
+                    connectEvents();
+
+                    setInterval(
+                        updateRelativeTimes,
+                        1000
+                    );
+
+                }
+            );
+
         </script>
     </head>
-    <body class="min-h-screen bg-zinc-950 text-zinc-100">
 
-        <main class="mx-auto max-w-7xl px-6 py-8">
 
-            <header class="mb-8 flex items-end justify-between gap-4">
+    <body
+        class="
+            min-h-screen
+            bg-zinc-950
+            text-zinc-100
+        "
+    >
+
+        <main
+            class="
+                mx-auto
+                max-w-7xl
+                px-6
+                py-8
+            "
+        >
+
+            <header
+                class="
+                    mb-8
+                    flex
+                    flex-col
+                    gap-4
+                    sm:flex-row
+                    sm:items-end
+                    sm:justify-between
+                "
+            >
 
                 <div>
-                    <h1 class="text-3xl font-bold tracking-tight">
+
+                    <h1
+                        class="
+                            text-3xl
+                            font-bold
+                            tracking-tight
+                        "
+                    >
                         Environment
                     </h1>
 
-                    <p class="mt-1 text-sm text-zinc-400">
-                        Live sensor overview
-                    </p>
+                    <div
+                        class="
+                            mt-1
+                            flex
+                            items-center
+                            gap-2
+                            text-sm
+                            text-zinc-400
+                        "
+                    >
+
+                        <span>
+                            Live sensor overview
+                        </span>
+
+                        <span
+                            class="text-zinc-700"
+                        >
+                            •
+                        </span>
+
+                        <span
+                            id="stream-count"
+                            class="text-zinc-500"
+                        >
+                            0 streams
+                        </span>
+
+                    </div>
+
                 </div>
 
-                <!-- <div class="text-right text-xs text-zinc-500">
 
-                    <div id="refresh-status">
-                        Updated
-                    </div>
+                <div
+                    class="
+                        flex
+                        items-center
+                        gap-2
+                        rounded-full
+                        border
+                        border-zinc-800
+                        bg-zinc-900
+                        px-3
+                        py-2
+                    "
+                >
 
-                    <div class="mt-1">
-                        Refresh in
-                        <span
-                            id="refresh-countdown"
-                            class="font-medium text-zinc-300"
-                        >
-                            60s
-                        </span>
-                    </div>
+                    <span
+                        id="connection-indicator"
+                        class="
+                            h-2
+                            w-2
+                            rounded-full
+                            bg-zinc-500
+                        "
+                    ></span>
 
-                </div> -->
+                    <span
+                        id="connection-label"
+                        class="
+                            text-xs
+                            font-medium
+                            text-zinc-400
+                        "
+                    >
+                        Connecting
+                    </span>
+
+                </div>
 
             </header>
 
-            <section id="sensor-grid" class="grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+
+            <section
+                id="stream-grid"
+                class="
+                    grid
+                    grid-cols-1
+                    gap-5
+                    md:grid-cols-2
+                    xl:grid-cols-3
+                "
+            >
             </section>
+
+
+            <section
+                id="empty-state"
+                class="
+                    hidden
+                    rounded-2xl
+                    border
+                    border-dashed
+                    border-zinc-800
+                    bg-zinc-900/40
+                    px-6
+                    py-16
+                    text-center
+                "
+            >
+
+                <p
+                    class="
+                        text-lg
+                        font-medium
+                        text-zinc-300
+                    "
+                >
+                    No data streams
+                </p>
+
+                <p
+                    class="
+                        mt-2
+                        text-sm
+                        text-zinc-500
+                    "
+                >
+                    Registered sensors will appear here automatically.
+                </p>
+
+            </section>
+
         </main>
+
     </body>
 </html>
