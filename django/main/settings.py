@@ -18,6 +18,8 @@ load_dotenv()
 
 DEVICE_API_KEY = os.environ["DEVICE_API_KEY"]
 
+DEVICE_OFFLINE_AFTER_SECONDS = 90
+
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 

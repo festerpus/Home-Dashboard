@@ -77,6 +77,18 @@ def serialize_stream(stream, include_latest=True):
             "type": "local",
             "device_id": stream.internal.device_id,
         }
+
+        local = stream.internal
+
+        last_seen_at = local.last_seen_at
+
+        online = (
+            last_seen_at is not None
+            and timezone.now() - last_seen_at
+            <= timedelta(
+                seconds=settings.DEVICE_OFFLINE_AFTER_SECONDS
+            )
+        )
     except LocalStream.DoesNotExist:
         try:
             data["source"] = {
@@ -105,6 +117,15 @@ def serialize_stream(stream, include_latest=True):
             if latest
             else None
         )
+
+    data["state"] = {
+        "status": "online" if online else "offline",
+        "last_seen_at": (
+            last_seen_at.isoformat()
+            if last_seen_at
+            else None
+        ),
+    }
 
     return data
 
@@ -315,6 +336,9 @@ def register_local(request):
 
             ds.save()
 
+            ls.last_seen_at = timezone.now()
+            ls.save()
+
             created = False
         else:
             ds = DataStream.objects.create(
@@ -322,10 +346,13 @@ def register_local(request):
                 metadata = metadata
             )
 
-            LocalStream.objects.create(
+            ls = LocalStream.objects.create(
                 device_id = data['device_id'],
-                stream=ds
+                stream=ds,
             )
+
+            ls.last_seen_at = timezone.now()
+            ls.save()
 
             created = True
 
@@ -479,6 +506,9 @@ def local_ingest(request):
         observed_at = timestamp,
         measurements = data['readings']
     )
+
+    ls.last_seen_at = timezone.now()
+    ls.save()
 
     return JsonResponse({
         "status": "ok",
@@ -685,6 +715,9 @@ def bulk_local_ingest(request):
 
     with transaction.atomic():
         Reading.objects.bulk_create(readings_to_create)
+
+    ls.last_seen_at = timezone.now()
+    ls.save()
 
     return JsonResponse(
         {
