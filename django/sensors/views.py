@@ -485,6 +485,216 @@ def local_ingest(request):
     }, status=200)
 
 
+@csrf_exempt
+@require_POST
+def bulk_local_ingest(request):
+    """
+        Expected data shape recieved from local device:
+
+        {
+            "device_id": "example-device-1",
+            "measurements": [
+                {
+                    "timestamp": "2026-09-06T16:32:14Z",
+                    "readings": {
+                        "temperature": 12.34,
+                        ...
+                    }
+                },
+                ...
+            ]
+        }
+    """
+
+    # Config
+
+    MAX_BULK_READINGS = 1000
+
+    # Validation:
+
+    api_key = request.headers.get("X-API-Key")
+    
+    if not api_key or not secrets.compare_digest(api_key, settings.DEVICE_API_KEY):
+        return JsonResponse({
+            "error": "Unauthorized"
+        }, status=401)
+
+    # Checking obj is valid JSON
+    try:
+        data = json.loads(request.body)
+    except json.JSONDecodeError:
+        return JsonResponse(
+            {"error": "Invalid JSON"},
+            status=400
+        )
+
+    # Validate top-level structure
+    if not isinstance(data, dict):
+        return JsonResponse(
+            {"error": "Body must be a JSON object"},
+            status=400
+        )
+
+    # Ensuring required object fields are correct
+    required_fields = {
+        "device_id",
+        "measurements"
+    }
+
+    if not required_fields.issubset(data):
+        return JsonResponse(
+            {"error": "Missing required fields"},
+            status=400
+        )
+
+    # Type checking
+    if not isinstance(data["device_id"], str) or not data["device_id"].strip():
+        return JsonResponse(
+            {"error": "device_id must be a non-empty string"},
+            status=400
+        )
+
+    if not isinstance(data['measurements'], list):
+        return JsonResponse(
+            {"error": "measurements must be an array (list)"},
+            status=400
+        )
+
+    if not data["measurements"]:
+        return JsonResponse(
+            {"error": "measurements must not be empty"},
+            status=400
+        )
+
+    if len(data["measurements"]) > MAX_BULK_READINGS:
+        return JsonResponse(
+            {
+                "error": f"Maximum batch size is {MAX_BULK_READINGS}"
+            },
+            status=400
+        )
+
+    # Checking individual readings, if 1 malformed ditch all
+    for index, reading in enumerate(data['measurements']):
+        if not isinstance(reading, dict):
+            return JsonResponse(
+                {"error": f"reading {index}: must be a JSON object"},
+                status=400
+            )
+
+        # Checking reading has correct fields
+        required_measurement_fields = {
+            "timestamp",
+            "readings"
+        }
+
+        if not required_measurement_fields.issubset(reading):
+            return JsonResponse(
+                {"error": f"reading {index}: missing required fields"},
+                status=400
+            )
+
+        # Type checking reading fields
+        if not isinstance(reading["timestamp"], str):
+            return JsonResponse(
+                {"error": f"reading {index}: timestamp must be a string"},
+                status=400
+            )
+
+        try:
+            reading_timestamp = datetime.fromisoformat(
+                reading["timestamp"].replace("Z", "+00:00")
+            )
+
+            if reading_timestamp.tzinfo is None:
+                raise ValueError
+
+        except (ValueError, TypeError):
+            return JsonResponse(
+                {"error": f"reading {index}: timestamp must be a timezone-aware ISO 8601 datetime"},
+                status=400
+            )
+
+        if not isinstance(reading["readings"], dict):
+            return JsonResponse(
+                {"error": f"reading {index}: readings must be an object"},
+                status=400
+            )
+
+        if not reading["readings"]:
+            return JsonResponse(
+                {"error": f"reading {index}: readings must not be empty"},
+                status=400
+            )
+
+        # Validate every metric
+        for key, metric in reading["readings"].items():
+
+            if not isinstance(key, str) or not key.strip():
+                return JsonResponse(
+                    {"error": f"reading {index}: Reading keys must be non-empty strings"},
+                    status=400
+                )
+
+            if (
+                isinstance(metric, bool)
+                or not isinstance(metric, (int, float))
+                or not math.isfinite(metric)
+            ):
+                return JsonResponse(
+                    {"error": f"reading {index}: Reading '{key}' must be a finite number"},
+                    status=400
+                )
+
+    # Get the datastream based on the localstream
+    try:
+        ls = LocalStream.objects.select_related("stream").get(
+            device_id=data["device_id"]
+        )
+    except LocalStream.DoesNotExist:
+        return JsonResponse(
+            {"error": "Unknown device"},
+            status=404
+        )
+
+    registered_metrics = ls.stream.metrics
+
+    readings_to_create = []
+
+    for reading in data["measurements"]:
+
+        # Check every supplied metric is registered
+        for key in reading["readings"]:
+            if key not in registered_metrics:
+                return JsonResponse(
+                    {"error": f"Unknown metric '{key}'"},
+                    status=400
+                )
+
+        reading_timestamp = datetime.fromisoformat(
+            reading["timestamp"].replace("Z", "+00:00")
+        )
+
+        readings_to_create.append(
+            Reading(
+                stream=ls.stream,
+                observed_at=reading_timestamp,
+                measurements=reading["readings"],
+            )
+        )
+
+    with transaction.atomic():
+        Reading.objects.bulk_create(readings_to_create)
+
+    return JsonResponse(
+        {
+            "status": "ok",
+            "created": len(readings_to_create)
+        },
+        status=200
+    )
+
+
 @require_GET
 def all_streams(request):
     streams = (

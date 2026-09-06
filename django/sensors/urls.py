@@ -13,6 +13,8 @@ urlpatterns = [
     path("register-local/", views.register_local, name="register_local"),
     path("local-ingest/", views.local_ingest, name="local_ingest"),
 
+    path("bulk-local-ingest/", views.bulk_local_ingest, name="bulk_local_ingest"),
+
     # SSE
     path("events/", sse.all_events, name="all_events"),
     path("streams/<uuid:stream_id>/events/", sse.stream_events, name="stream_events"),
