@@ -4,5 +4,5 @@ from dashboard import views
 
 urlpatterns = [
     path("", views.index, name="index"),
-    # path("device/<uuid:device_id>/", views.device, name="device")
+    path("streams/<uuid:stream_id>/", views.stream, name="stream")#
 ]
