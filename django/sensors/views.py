@@ -1,184 +1,559 @@
-from datetime import timedelta
-from dateutil.relativedelta import relativedelta
+# from datetime import timedelta
+# from dateutil.relativedelta import relativedelta
 
 from django.http import JsonResponse
-from django.utils import timezone
+from django.shortcuts import render
+from django.views.decorators.http import require_POST
+from django.views.decorators.csrf import csrf_exempt
+from django.db import transaction
+from datetime import datetime
 
-from sensors.models import Device, Reading, State
+import serial
+import json
+import time
+import math
+import secrets
 
+# from sensors.models import Device, Reading, State
+from sensors.models import DataStream, LocalStream, Reading
 
-class DeviceNotFound(Exception):
-    pass
-
-
-def sensor_latest(identifier):
-    device = Device.from_identifier(identifier)
-
-    if device is None:
-        # raise Http404("Device not found")
-        raise DeviceNotFound(f"Device '{identifier}' not found")
-
-    latest_reading = (
-        Reading.objects
-        .filter(device=device)
-        .order_by("-received_at")
-        .first()
-    )
-
-    latest_state = (
-        State.objects
-        .filter(device=device)
-        .order_by("-datetime")
-        .first()
-    )
-
-    return {
-        "device": device,
-        "data": {
-            "id": str(device.id),
-            "device_id": device.device_id,
-            "name": str(device),
-            "active": latest_state.active if latest_state else None,
-            "state_changed_at": latest_state.datetime.isoformat() if latest_state else None,
-            "latest_reading_received_at": latest_reading.received_at.isoformat() if latest_reading else None,
-            "latest_reading": latest_reading.measurements if latest_reading else None
-        }
-    }
+# class DeviceNotFound(Exception):
+#     pass
 
 
-def single_sensor(request, identifier):
-    try:
-        device_data = sensor_latest(identifier)
+def screen_message(request):
+    return render(request, "screen_message.html", {})
 
-        return JsonResponse(device_data['data'], status=200)
+@require_POST
+def post_message(request):
+    data = json.loads(request.body)
 
-    except DeviceNotFound as exc:
-        return JsonResponse({
-            "error": "device_not_found",
-            "message": str(exc)
-        }, status=404)
+    ser = serial.Serial("COM5", 115200, timeout=3)
 
-    except Exception as exc:
-        return JsonResponse({
-            "error": "internal_server_error",
-            "message": str(exc)
-        }, status=500)
+    ser.dtr = False
+    ser.rts = False
 
+    time.sleep(0.25)
 
-def all_sensors(request):
-    try:
-        devices = Device.objects.all()
+    ser.write(f"{data['message']}\n".encode())
+    ser.flush()
 
-        return JsonResponse({
-            "sensors": [sensor_latest(device.device_id)['data'] for device in devices]
-        }, status=200)
-
-    except Exception as exc:
-        return JsonResponse({
-            "error": "internal_server_error",
-            "message": str(exc)
-        }, status=500)
+    return JsonResponse({"status":"ok"}, status=200)
 
 
-def sensor_history(request, identifier):
+"""
+eps initially makes request on boot to register endpoint, checks if registered with current
+up-to-date units, if not registered / up-to-date it updates, then just sends readings
+"""
 
-    # Identifier validation
+# API Key for devices, use one for all devices for now, will upgrade to bearer / whatever later on
+# ESP32 should be hardcoded to send this api-key, if not req will be refused
 
-    try:
-        device_data = sensor_latest(identifier)
+@csrf_exempt
+@require_POST
+def register_local(request):
+    """
+        Expected data shape recieved from local device:
 
-        device = device_data['device']
-        data = device_data['data']
-
-    except DeviceNotFound as exc:
-        return JsonResponse({
-            "error": "device_not_found",
-            "message": str(exc)
-        }, status=404)
-
-    except Exception as exc:
-        return JsonResponse({
-            "error": "internal_server_error",
-            "message": str(exc)
-        }, status=500)
-
-
-    # Parameters validation 
-
-    def invalid_parameter_error(message):
-        return JsonResponse({
-            "error": "invalid_parameter",
-            "message": message
-        }, status=400)
-
-    allowed_params = {
-        "months",
-        "weeks",
-        "days",
-        "hours",
-        "minutes",
-        "seconds"
-    }
-
-    unknown_params = set(request.GET.keys()) - allowed_params
-
-    if unknown_params:
-        return invalid_parameter_error(f"Unknown parameter(s): {', '.join(sorted(unknown_params))}")
-
-    params = {
-        "months": request.GET.get("months", "0"),
-        "weeks": request.GET.get("weeks", "0"),
-        "days": request.GET.get("days", "0"),
-        "hours": request.GET.get("hours", "0"),
-        "minutes": request.GET.get("minutes", "0"),
-        "seconds": request.GET.get("seconds", "0")
-    }
-
-    if not request.GET:
-        params['days'] = "1"
-
-    for param, value in params.items():
-        try:
-            value = int(value)
-        except ValueError:
-            return invalid_parameter_error(f"'{param}' must be an integer")
-
-        if value < 0:
-            return invalid_parameter_error(f"'{param}' must be 0 or greater")
-
-        params[param] = value
-
-    # Using given parameters to calculate the date range
-
-    since = (
-        timezone.now()
-        - relativedelta(months=params['months'])
-        - timedelta(
-            weeks=params['weeks'],
-            days=params['days'],
-            hours=params['hours'],
-            minutes=params['minutes'],
-            seconds=params['seconds']
-        )
-    )
-
-    # Getting reading from device in date range 
-
-    readings = (
-        Reading.objects
-        .filter(
-            device=device,
-            received_at__gte=since
-        )
-        .order_by("received_at")
-    )
-
-    data.pop("latest_reading", None)
-    data['readings'] = [
         {
-            "received_at": reading.received_at.isoformat(),
-            "measurements": reading.measurements
-        } for reading in readings
-    ]
+            "device_id": "example-device-1",
+            "metrics": {
+                "temperature": {
+                    "name": "Temperature",
+                    "unit": "°C",
+                    "decimals": 2
+                }
+                ...
+            },
+            "metadata": {
+                ...
+            }
+        }
+    """
 
-    return JsonResponse(data, status=200)
+    """
+        Validation:
+    """
+
+    api_key = request.headers.get("X-API-Key")
+
+    if api_key != DEVICE_API_KEY:
+        return JsonResponse({
+            "error": "Unauthorized"
+        }, status=401)
+
+    # Checking obj is valid JSON
+    try:
+        data = json.loads(request.body)
+    except json.JSONDecodeError:
+        return JsonResponse(
+            {"error": "Invalid JSON"},
+            status=400
+        )
+
+    # Validate top-level structure
+    if not isinstance(data, dict):
+        return JsonResponse(
+            {"error": "Body must be a JSON object"},
+            status=400
+        )
+
+    # Ensuring required object fields are correct
+    required_fields = {
+        "device_id",
+        "metrics"
+    }
+
+    if not required_fields.issubset(data):
+        return JsonResponse(
+            {"error": "Missing required fields"},
+            status=400
+        )
+
+    # if metadata present validate it:
+    if "metadata" in data and not isinstance(data["metadata"], dict):
+        return JsonResponse(
+            {"error": "metadata must be an object"},
+            status=400
+        )
+
+    # Type checking
+    if not isinstance(data["device_id"], str):
+        return JsonResponse(
+            {"error": "device_id must be a string"},
+            status=400
+        )
+
+    if not isinstance(data["metrics"], dict):
+        return JsonResponse(
+            {"error": "metrics must be an object"},
+            status=400
+        )
+
+    # Validate every metric
+    for key, metric in data["metrics"].items():
+
+        if not isinstance(metric, dict):
+            return JsonResponse(
+                {"error": f"Metric '{key}' must be an object"},
+                status=400
+            )
+
+        if not {"name", "unit", "decimals"}.issubset(metric):
+            return JsonResponse(
+                {"error": f"Metric '{key}' is missing required fields"},
+                status=400
+            )
+
+        if not isinstance(metric["name"], str):
+            return JsonResponse(
+                {"error": f"Metric '{key}'.name must be a string"},
+                status=400
+            )
+
+        if not isinstance(metric["unit"], str):
+            return JsonResponse(
+                {"error": f"Metric '{key}'.unit must be a string"},
+                status=400
+            )
+
+        if not isinstance(metric["decimals"], int):
+            return JsonResponse(
+                {"error": f"Metric '{key}'.decimals must be an integer"},
+                status=400
+            )
+
+    # Payload is now structually valid:
+
+    # Now we need to create a datastream with the metrics
+    # and a localStream object to handle the device + metadata
+
+    # Check if the local stream exists first, if it does, we need to check
+    # if the datastream has the correct metrics and metadata, if it doesnt
+    # we need to create the datastream then the localstream
+
+    with transaction.atomic():
+        metadata = data.get('metadata', {})
+
+        if LocalStream.objects.filter(device_id=data['device_id']).exists():
+            ls = LocalStream.objects.get(device_id=data['device_id'])
+            ds = ls.stream
+
+            ds.metrics = data['metrics']
+            ds.metadata = metadata
+
+            ds.save()
+
+            created = False
+        else:
+            ds = DataStream.objects.create(
+                metrics = data['metrics'],
+                metadata = metadata
+            )
+
+            LocalStream.objects.create(
+                device_id = data['device_id'],
+                stream=ds
+            )
+
+            created = True
+
+    return JsonResponse({
+        "status": "ok",
+        "created": created
+    }, status=200)
+
+
+
+@csrf_exempt
+@require_POST
+def local_ingest(request):
+
+    """
+        Expected data shape recieved from local device:
+
+        {
+            "device_id": "example-device-1",
+            "timestamp": "2026-09-06T16:32:14Z",
+            "readings": {
+                "temperature": 12.34,
+                ...
+            }
+        }
+    """
+
+    # Validation:
+
+    api_key = request.headers.get("X-API-Key")
+    
+    if not api_key or not secrets.compare_digest(api_key, DEVICE_API_KEY):
+        return JsonResponse({
+            "error": "Unauthorized"
+        }, status=401)
+
+    # Checking obj is valid JSON
+    try:
+        data = json.loads(request.body)
+    except json.JSONDecodeError:
+        return JsonResponse(
+            {"error": "Invalid JSON"},
+            status=400
+        )
+
+    # Validate top-level structure
+    if not isinstance(data, dict):
+        return JsonResponse(
+            {"error": "Body must be a JSON object"},
+            status=400
+        )
+
+    # Ensuring required object fields are correct
+    required_fields = {
+        "device_id",
+        "timestamp",
+        "readings"
+    }
+
+    if not required_fields.issubset(data):
+        return JsonResponse(
+            {"error": "Missing required fields"},
+            status=400
+        )
+
+    if not isinstance(data["device_id"], str) or not data["device_id"].strip():
+        return JsonResponse(
+            {"error": "device_id must be a non-empty string"},
+            status=400
+        )
+
+    if not isinstance(data["timestamp"], str):
+        return JsonResponse(
+            {"error": "timestamp must be a string"},
+            status=400
+        )
+
+    try:
+        timestamp = datetime.fromisoformat(
+            data["timestamp"].replace("Z", "+00:00")
+        )
+
+        if timestamp.tzinfo is None:
+            raise ValueError
+
+    except (ValueError, TypeError):
+        return JsonResponse(
+            {"error": "timestamp must be a timezone-aware ISO 8601 datetime"},
+            status=400
+        )
+
+
+    if not isinstance(data["readings"], dict):
+        return JsonResponse(
+            {"error": "readings must be an object"},
+            status=400
+        )
+
+    if not data["readings"]:
+        return JsonResponse(
+            {"error": "readings must not be empty"},
+            status=400
+        )
+
+    
+    # Validate every metric
+    for key, metric in data["readings"].items():
+
+        if not isinstance(key, str) or not key.strip():
+            return JsonResponse(
+                {"error": "Reading keys must be non-empty strings"},
+                status=400
+            )
+
+        if (
+            isinstance(metric, bool)
+            or not isinstance(metric, (int, float))
+            or not math.isfinite(metric)
+        ):
+            return JsonResponse(
+                {"error": f"Reading '{key}' must be a finite number"},
+                status=400
+            )
+
+    # Create the reading assigned to the datastream
+
+    # Get the datastream based on the localstream
+    try:
+        ls = LocalStream.objects.select_related("stream").get(
+            device_id=data["device_id"]
+        )
+    except LocalStream.DoesNotExist:
+        return JsonResponse(
+            {"error": "Unknown device"},
+            status=404
+        )
+
+    # Ensuring the metrics in readings match what we've registered
+
+    registered_metrics = ls.stream.metrics
+
+    for key in data["readings"]:
+        if key not in registered_metrics:
+            return JsonResponse(
+                {"error": f"Unknown metric '{key}'"},
+                status=400
+            )
+
+    Reading.objects.create(
+        stream=ls.stream,
+        observed_at = timestamp,
+        measurements = data['readings']
+    )
+
+    return JsonResponse({
+        "status": "ok",
+    }, status=200)
+
+# @csrf_exempt
+# @require_POST
+# def local_ingest(request):
+#     print(DEVICE_API_KEY)
+
+
+
+# @require_POST
+# def local_ingest(request):
+#     data = json.loads(request.body)
+
+#     """
+#         Expected data shape received from local device:
+        
+#         {
+#             "device_id": "example-device-1",
+#             "units": {
+#                 "reading_1": {
+#                     "name": "Temperature",
+#                     "unit": "°C",
+#                     "decimals": 2
+#                 },
+#                 ...
+#             },
+#             "readings": {
+#                 "reading_1": 12.34,
+#                 ...
+#             }
+#         }
+#     """
+
+
+
+# def sensor_latest(identifier):
+#     device = Device.from_identifier(identifier)
+
+#     if device is None:
+#         # raise Http404("Device not found")
+#         raise DeviceNotFound(f"Device '{identifier}' not found")
+
+#     latest_reading = (
+#         Reading.objects
+#         .filter(device=device)
+#         .order_by("-received_at")
+#         .first()
+#     )
+
+#     latest_state = (
+#         State.objects
+#         .filter(device=device)
+#         .order_by("-datetime")
+#         .first()
+#     )
+
+#     return {
+#         "device": device,
+#         "data": {
+#             "id": str(device.id),
+#             "device_id": device.device_id,
+#             "name": str(device),
+#             "active": latest_state.active if latest_state else None,
+#             "state_changed_at": latest_state.datetime.isoformat() if latest_state else None,
+#             "latest_reading_received_at": latest_reading.received_at.isoformat() if latest_reading else None,
+#             "latest_reading": latest_reading.measurements if latest_reading else None
+#         }
+#     }
+
+
+# def single_sensor(request, identifier):
+#     try:
+#         device_data = sensor_latest(identifier)
+
+#         return JsonResponse(device_data['data'], status=200)
+
+#     except DeviceNotFound as exc:
+#         return JsonResponse({
+#             "error": "device_not_found",
+#             "message": str(exc)
+#         }, status=404)
+
+#     except Exception as exc:
+#         return JsonResponse({
+#             "error": "internal_server_error",
+#             "message": str(exc)
+#         }, status=500)
+
+
+# def all_sensors(request):
+#     try:
+#         devices = Device.objects.all()
+
+#         return JsonResponse({
+#             "sensors": [sensor_latest(device.device_id)['data'] for device in devices]
+#         }, status=200)
+
+#     except Exception as exc:
+#         return JsonResponse({
+#             "error": "internal_server_error",
+#             "message": str(exc)
+#         }, status=500)
+
+
+# def sensor_history(request, identifier):
+
+#     # Identifier validation
+
+#     try:
+#         device_data = sensor_latest(identifier)
+
+#         device = device_data['device']
+#         data = device_data['data']
+
+#     except DeviceNotFound as exc:
+#         return JsonResponse({
+#             "error": "device_not_found",
+#             "message": str(exc)
+#         }, status=404)
+
+#     except Exception as exc:
+#         return JsonResponse({
+#             "error": "internal_server_error",
+#             "message": str(exc)
+#         }, status=500)
+
+
+#     # Parameters validation 
+
+#     def invalid_parameter_error(message):
+#         return JsonResponse({
+#             "error": "invalid_parameter",
+#             "message": message
+#         }, status=400)
+
+#     allowed_params = {
+#         "months",
+#         "weeks",
+#         "days",
+#         "hours",
+#         "minutes",
+#         "seconds"
+#     }
+
+#     unknown_params = set(request.GET.keys()) - allowed_params
+
+#     if unknown_params:
+#         return invalid_parameter_error(f"Unknown parameter(s): {', '.join(sorted(unknown_params))}")
+
+#     params = {
+#         "months": request.GET.get("months", "0"),
+#         "weeks": request.GET.get("weeks", "0"),
+#         "days": request.GET.get("days", "0"),
+#         "hours": request.GET.get("hours", "0"),
+#         "minutes": request.GET.get("minutes", "0"),
+#         "seconds": request.GET.get("seconds", "0")
+#     }
+
+#     if not request.GET:
+#         params['days'] = "1"
+
+#     for param, value in params.items():
+#         try:
+#             value = int(value)
+#         except ValueError:
+#             return invalid_parameter_error(f"'{param}' must be an integer")
+
+#         if value < 0:
+#             return invalid_parameter_error(f"'{param}' must be 0 or greater")
+
+#         params[param] = value
+
+#     # Using given parameters to calculate the date range
+
+#     since = (
+#         timezone.now()
+#         - relativedelta(months=params['months'])
+#         - timedelta(
+#             weeks=params['weeks'],
+#             days=params['days'],
+#             hours=params['hours'],
+#             minutes=params['minutes'],
+#             seconds=params['seconds']
+#         )
+#     )
+
+#     # Getting reading from device in date range 
+
+#     readings = (
+#         Reading.objects
+#         .filter(
+#             device=device,
+#             received_at__gte=since
+#         )
+#         .order_by("received_at")
+#     )
+
+#     data.pop("latest_reading", None)
+#     data['readings'] = [
+#         {
+#             "received_at": reading.received_at.isoformat(),
+#             "measurements": reading.measurements
+#         } for reading in readings
+#     ]
+
+#     return JsonResponse(data, status=200)

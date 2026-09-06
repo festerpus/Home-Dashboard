@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html>
+    <head>
+        <title>Screen Message</title>
+        <script>
+            window.addEventListener("DOMContentLoaded", () => {
+                const csrftoken = document.querySelector(
+                    "[name=csrfmiddlewaretoken]"
+                ).value;
+
+
+                document.querySelector("button").addEventListener("click", () => {
+                    fetch("{% url 'post_message' %}", {
+                        method: "POST",
+                        headers: {
+                            "Content-Type": "application/json",
+                            "X-CSRFToken": csrftoken,
+                        },
+                        body: JSON.stringify({
+                            message: document.querySelector("input").value
+                        }),
+                    })
+                    .then(response => response.json())
+                    .then(data => {
+                        console.log(data)
+                    })
+                    .catch(error => {
+                        console.error(error)
+                    }); 
+                });
+            });
+        </script>
+    </head>
+    <body>
+        <input type="text">
+        <button>Send</button>
+
+        {% csrf_token %}
+    </body>
+</html>

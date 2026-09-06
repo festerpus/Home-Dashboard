@@ -7,7 +7,7 @@
 const int THERMISTOR_PIN = A0;
 
 // Your measured fixed resistor
-const float R_FIXED = 100000;
+const float R_FIXED = 96000;
 
 // Thermistor characteristics
 const float R0 = 100000.0;     // 100kΩ at 25°C
@@ -94,21 +94,21 @@ void setup() {
 
   Serial.begin(9600);
 
-  // Segment outputs
-  for (int i = 0; i < 7; i++) {
-    pinMode(segmentPins[i], OUTPUT);
-    digitalWrite(segmentPins[i], HIGH); // OFF - common anode
-  }
+  // // Segment outputs
+  // for (int i = 0; i < 7; i++) {
+  //   pinMode(segmentPins[i], OUTPUT);
+  //   digitalWrite(segmentPins[i], HIGH); // OFF - common anode
+  // }
 
-  pinMode(dpPin, OUTPUT);
-  digitalWrite(dpPin, HIGH); // DP off
+  // pinMode(dpPin, OUTPUT);
+  // digitalWrite(dpPin, HIGH); // DP off
 
 
-  // Digit outputs
-  for (int i = 0; i < 4; i++) {
-    pinMode(digitPins[i], OUTPUT);
-    digitalWrite(digitPins[i], LOW); // digit off
-  }
+  // // Digit outputs
+  // for (int i = 0; i < 4; i++) {
+  //   pinMode(digitPins[i], OUTPUT);
+  //   digitalWrite(digitPins[i], LOW); // digit off
+  // }
 
   readTemperature();
 }
@@ -128,23 +128,25 @@ void loop() {
 
 
   // Continuously refresh display
-  displayTemperature(temperatureC);
+  // displayTemperature(temperatureC);
 
+  sendReading();
+  delay(2000);
 
   // Check whether PC/server has requested data
-  if (Serial.available()) {
+  // if (Serial.available()) {
 
-    String command = Serial.readStringUntil('\n');
-    command.trim();
+  //   String command = Serial.readStringUntil('\n');
+  //   command.trim();
 
-    if (command == "READ") {
+  //   if (command == "READ") {
 
-      // Take a fresh reading when requested
-      readTemperature();
+  //     // Take a fresh reading when requested
+  //     readTemperature();
 
-      sendReading();
-    }
-  }
+  //     sendReading();
+  //   }
+  // }
 }
 
 
